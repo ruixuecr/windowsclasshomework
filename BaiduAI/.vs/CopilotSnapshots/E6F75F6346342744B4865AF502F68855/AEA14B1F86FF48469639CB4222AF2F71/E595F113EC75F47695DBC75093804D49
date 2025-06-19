@@ -1,0 +1,973 @@
+﻿using AForge.Controls;
+using AForge.Video;
+using AForge.Video.DirectShow;
+using Baidu.Aip.Face;
+using BaiduAI.Common;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Security.Policy;
+using System.Text;
+using System.Threading;
+using System.Windows;
+using System.Windows.Forms;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
+
+
+namespace BaiduAI
+{
+    public partial class Form1 : Form
+    {
+        /*
+         * 百度AI平台认证凭据
+         * 应用配置参数模块
+         * 开发者需要在百度AI开放平台注册获取以下三个关键参数
+         * 用于API身份验证和安全调用
+         */
+        private string APP_ID = "6944914";  // 百度AI开放平台的应用ID，用于标识应用身份
+        private string API_KEY = "AczsKUZ3pa4P16gV8Dn8A2ny";  // API访问密钥，用于接口调用的身份验证
+        private string SECRET_KEY = "2QQe4ZAUdGGeoB78onqw5EN0qaT3xvNY";  // 安全密钥，用于签名生成，确保请求安全性
+
+        /*
+         * 百度AI SDK客户端实例
+         * 核心接口调用模块
+         * 所有百度人脸识别API的调用入口
+         */
+        private Face client = null;  // 百度人脸识别SDK客户端实例，用于所有API调用的入口
+
+        // 构造函数中初始化Face客户端
+        // Face类通过API_KEY和SECRET_KEY完成OAuth2.0认证
+        // 初始化后会自动管理访问令牌的获取和刷新
+        /// <summary>
+        /// 是否可以检测人脸
+        /// </summary>
+        private bool IsStart = false;
+        /// <summary>
+        /// 人脸在图像中的位置
+        /// </summary>
+        private FaceLocation location = null;
+
+        /* 
+         * 视频设备相关属性
+         * 使用AForge.NET框架实现摄像头操作
+         */
+        private FilterInfoCollection videoDevices = null;  // 存储系统可用的所有视频输入设备
+        private VideoCaptureDevice videoSource;  // 当前使用的视频捕获设备
+
+        /*
+         * 窗体初始化方法
+         * 完成UI界面、百度AI SDK客户端初始化等工作 
+         */
+        public Form1()
+        {
+            InitializeComponent();
+            // 设置Windows Media Player控件为隐藏模式，仅用于播放声音而不显示界面
+            axWindowsMediaPlayer1.uiMode = "Invisible";
+            // 初始化百度人脸识别客户端，传入API密钥完成认证
+            client = new Face(API_KEY, SECRET_KEY);
+        }
+
+        /// <summary>
+        /// 图像转Base64编码
+        /// </summary>
+        /// <param name="file">需要转换的图像对象</param>
+        /// <returns>Base64编码字符串</returns>
+        /// <remarks>
+        /// 百度AI接口要求图像必须转换为Base64格式传输
+        /// 此方法将Image对象转换为Base64字符串
+        /// </remarks>
+        public string ConvertImageToBase64(Image file)
+        {
+            using (MemoryStream memoryStream = new MemoryStream())
+            {
+                file.Save(memoryStream, file.RawFormat);  // 保持原始图像格式写入内存流
+                byte[] imageBytes = memoryStream.ToArray();  // 获取图像字节数组
+                return Convert.ToBase64String(imageBytes);  // 转换为Base64字符串
+            }
+        }
+
+        /// <summary>
+        /// 选择图片并进行人脸检测按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 实现人脸检测核心流程：
+        /// 1. 弹出文件选择对话框选择图片
+        /// 2. 将图片转换为Base64格式
+        /// 3. 调用百度AI人脸检测API
+        /// 4. 显示检测结果
+        /// </remarks>
+        private void button1_Click(object sender, EventArgs e)
+        {
+            // 创建并配置文件选择对话框
+            OpenFileDialog dialog = new OpenFileDialog();
+            dialog.InitialDirectory = "E:\\教学\\VS222302 - desktop\\baiduAIFaceIdentify-master\\baiduAIFaceIdentify-master\\BaiduAI\\BaiduAI\\bin\\Debug";
+            dialog.Filter = "所有文件|*.*";
+            dialog.RestoreDirectory = true;
+            dialog.FilterIndex = 1;
+            
+            // 显示文件选择对话框
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                string filename = dialog.FileName;
+                try
+                {
+                    // 加载选中图片并转换为Base64格式
+                    Image im = Image.FromFile(filename);
+                    var image = ConvertImageToBase64(im);
+                    string imageType = "BASE64";  // 指定图像编码类型为BASE64
+
+                    /* 
+                     * 百度人脸检测API参数配置
+                     * face_field: 指定需要返回的人脸属性，包括年龄(age)和颜值(beauty)
+                     * face_fields: 指定需要返回的人脸特征字段，包括年龄、质量和颜值
+                     */
+                    var options = new Dictionary<string, object>{
+                        //{"max_face_num", 2},  // 最多检测的人脸数量，此处注释掉
+                        {"face_field", "age,beauty"},  // 返回人脸的年龄和颜值信息
+                        {"face_fields", "age,qualities,beauty"}  // 返回人脸的年龄、质量和颜值信息
+                    };
+
+                    /* 
+                     * 备选参数配置方案
+                     * face_field: 仅返回年龄信息
+                     * max_face_num: 最多检测2个人脸
+                     * face_type: 指定检测的是生活照中的人脸
+                     * liveness_control: 设置低级活体检测控制
+                     */
+                    var options1 = new Dictionary<string, object>{
+                        {"face_field", "age"},
+                        {"max_face_num", 2},
+                        {"face_type", "LIVE"},
+                        {"liveness_control", "LOW"}
+                    };
+
+                    // 调用百度AI人脸检测API
+                    var result = client.Detect(image, imageType, options);
+
+                    // 将检测结果显示在文本框中
+                    textBox1.Text = result.ToString();
+
+                    // 注释掉的代码：将JSON结果反序列化为FaceDetectInfo对象
+                    //FaceDetectInfo detect = JsonHelper.DeserializeObject<FaceDetectInfo>(result.ToString());
+
+                } 
+                catch (Exception ex)
+                { 
+                    MessageBox.Show(ex.Message); 
+                }
+            }
+        }
+
+        /// <summary>
+        /// 从文件中读取图片并转换为Base64字符串
+        /// </summary>
+        /// <param name="img">图片文件路径</param>
+        /// <returns>Base64编码的字符串</returns>
+        public string ReadImg(string img)
+        {
+            return Convert.ToBase64String(File.ReadAllBytes(img));  // 直接读取文件字节并转为Base64
+        }
+
+        /// <summary>
+        /// 人脸比对按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 实现人脸比对核心流程：
+        /// 1. 获取两张人脸图片
+        /// 2. 构建API所需的请求参数
+        /// 3. 调用百度AI人脸比对API
+        /// 4. 显示比对结果
+        /// </remarks>
+        private void button2_Click(object sender, EventArgs e)
+        {
+            // 检查是否已选择两张待比对的图片
+            if (string.IsNullOrEmpty(textBox2.Text) || string.IsNullOrEmpty(textBox3.Text))
+            {
+                MessageBox.Show("请选择要对比的人脸图片");
+                return;
+            }
+            try
+            {
+                string path1 = textBox2.Text;  // 第一张人脸图片路径
+                string path2 = textBox3.Text;  // 第二张人脸图片路径
+                
+                /* 
+                 * 构建人脸比对所需的JSON数组
+                 * 使用Newtonsoft.Json.Linq创建JSON结构
+                 * 每个JObject包含一张人脸图片的相关参数
+                 */
+                var faces = new JArray
+                {
+                    new JObject
+                    {
+                        {"image", ReadImg(path1)},  // 第一张图片的Base64编码
+                        {"image_type", "BASE64"},   // 图片编码类型
+                        {"face_type", "LIVE"},      // 人脸类型：生活照
+                        {"quality_control", "LOW"}, // 质量控制：低级别
+                        {"liveness_control", "NONE"}, // 活体检测：不做活体检测
+                    },
+                    new JObject
+                    {
+                        {"image", ReadImg(path2)},  // 第二张图片的Base64编码
+                        {"image_type", "BASE64"},   // 图片编码类型
+                        {"face_type", "LIVE"},      // 人脸类型：生活照
+                        {"quality_control", "LOW"}, // 质量控制：低级别
+                        {"liveness_control", "NONE"}, // 活体检测：不做活体检测
+                    }
+                 };
+                
+                // 调用百度AI人脸比对API，传入包含两张人脸图片信息的JArray
+                var result = client.Match(faces);
+                // 显示比对结果，包含相似度分数和其他信息
+                textBox1.Text = result.ToString();
+            }
+            catch (Exception ex)
+            { 
+                // 异常处理，此处未显示错误信息
+            }
+        }
+
+        /// <summary>
+        /// 选择人脸比对图片按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 打开文件选择对话框，选择人脸比对的图片
+        /// 将选择的图片路径填充到相应的文本框
+        /// </remarks>
+        private void button3_Click(object sender, EventArgs e)
+        {
+            // 创建并配置文件选择对话框
+            OpenFileDialog dialog = new OpenFileDialog();
+            dialog.InitialDirectory = "D:\\";
+            dialog.Filter = "所有文件|*.*";
+            dialog.RestoreDirectory = true;
+            dialog.FilterIndex = 2;
+            
+            // 显示文件选择对话框
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                // 根据是否已有第一张图片，决定填充哪个文本框
+                if (string.IsNullOrEmpty(textBox2.Text))
+                {
+                    textBox2.Text = dialog.FileName;  // 填充第一张图片路径
+                }
+                else
+                {
+                    textBox3.Text = dialog.FileName;  // 填充第二张图片路径
+                }
+            }
+        }
+
+        /// <summary>
+        /// 窗体加载事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 窗体初始化时执行的操作：
+        /// 1. 枚举并加载系统中的视频设备
+        /// 2. 设置视频帧捕获事件处理
+        /// 3. 启动人脸检测定时器线程
+        /// </remarks>
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            /* 
+             * 视频设备初始化
+             * 枚举系统中的所有视频输入设备并加载到下拉列表中
+             */
+            videoDevices = new FilterInfoCollection(FilterCategory.VideoInputDevice);
+            if (videoDevices!=null && videoDevices.Count>0)
+            {
+                foreach (FilterInfo device in videoDevices)
+                {
+                    comboBox1.Items.Add(device.Name);  // 将设备名称添加到下拉列表
+                }
+                comboBox1.SelectedIndex = 0;  // 默认选择第一个设备
+            }
+
+            // 注册视频帧捕获事件处理器
+            videoSourcePlayer1.NewFrame += VideoSourcePlayer1_NewFrame;
+
+            /* 
+             * 启动人脸检测定时器线程
+             * 由于百度AI平台人脸识别接口限制每秒最多调用2次
+             * 使用线程池实现定时启动人脸检测
+             */
+            ThreadPool.QueueUserWorkItem(new WaitCallback(p => {
+                while (true)
+                {
+                    IsStart = true;  // 设置检测标志为true
+                    Thread.Sleep(500);  // 等待500毫秒，实现每秒检测2次
+                }
+            }));
+        }
+
+        /// <summary>
+        /// 视频帧捕获事件处理方法
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="image">捕获的图像帧</param>
+        /// <remarks>
+        /// 处理新的视频帧：
+        /// 1. 根据检测标志决定是否进行人脸检测
+        /// 2. 如有检测到的人脸，绘制人脸框
+        /// </remarks>
+        private void VideoSourcePlayer1_NewFrame(object sender, ref Bitmap image)
+        {
+            try
+            {
+                if (IsStart)
+                {
+                    IsStart = false;  // 重置检测标志
+                    /* 
+                     * 异步人脸检测处理
+                     * 使用线程池避免UI阻塞，确保视频流畅
+                     * 传入当前帧的克隆进行处理
+                     */
+                    ThreadPool.QueueUserWorkItem(new WaitCallback(this.Detect), image.Clone());
+                }
+                
+                // 如果检测到人脸位置信息，在视频帧上绘制人脸框
+                if (location != null)
+                {
+                    try
+                    {
+                        // 使用Graphics绘制四条线构成人脸框
+                        Graphics g = Graphics.FromImage(image);
+                        // 上边框线
+                        g.DrawLine(new Pen(Color.Black), new System.Drawing.Point(location.left, location.top), new System.Drawing.Point(location.left + location.width, location.top));
+                        // 左边框线
+                        g.DrawLine(new Pen(Color.Black), new System.Drawing.Point(location.left, location.top), new System.Drawing.Point(location.left, location.top + location.height));
+                        // 下边框线
+                        g.DrawLine(new Pen(Color.Black), new System.Drawing.Point(location.left, location.top + location.height), new System.Drawing.Point(location.left + location.width, location.top + location.height));
+                        // 右边框线
+                        g.DrawLine(new Pen(Color.Black), new System.Drawing.Point(location.left + location.width, location.top), new System.Drawing.Point(location.left + location.width, location.top + location.height));
+                        g.Dispose();  // 释放Graphics资源
+                    }
+                    catch (Exception ex)
+                    {
+                        ClassLoger.Error("VideoSourcePlayer1_NewFrame", ex);  // 记录绘制异常
+                    }
+                }
+            } 
+            catch (Exception ex)
+            {
+                ClassLoger.Error("VideoSourcePlayer1_NewFrame1", ex);  // 记录事件处理异常
+            }
+        }
+
+        /// <summary>
+        /// 连接并打开摄像头
+        /// </summary>
+        /// <remarks>
+        /// 创建视频捕获设备对象并启动视频流：
+        /// 1. 创建VideoCaptureDevice对象
+        /// 2. 设置视频参数（分辨率、帧率）
+        /// 3. 启动视频流
+        /// </remarks>
+        private void CameraConn()
+        {
+            // 检查是否有可用的视频设备
+            if (comboBox1.Items.Count <= 0)
+            {
+                MessageBox.Show("请插入视频设备");
+                return;
+            }
+            
+            // 创建视频捕获设备对象
+            videoSource = new VideoCaptureDevice(videoDevices[comboBox1.SelectedIndex].MonikerString);
+            // 设置视频分辨率为320x240
+            videoSource.DesiredFrameSize = new System.Drawing.Size(320, 240);
+            // 设置帧率为1帧/秒
+            videoSource.DesiredFrameRate = 1;
+            
+            // 将视频源设置到视频播放控件
+            videoSourcePlayer1.VideoSource = videoSource;
+            // 启动视频流
+            videoSourcePlayer1.Start();
+        }
+
+        /// <summary>
+        /// 重新检测视频设备按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 重新枚举系统中的视频设备并更新下拉列表
+        /// </remarks>
+        private void button6_Click(object sender, EventArgs e)
+        {
+            // 重新获取系统中的视频设备
+            videoDevices = new FilterInfoCollection(FilterCategory.VideoInputDevice);
+            if (videoDevices != null && videoDevices.Count > 0)
+            {
+                foreach (FilterInfo device in videoDevices)
+                {
+                    comboBox1.Items.Add(device.Name);  // 添加到下拉列表
+                }
+                comboBox1.SelectedIndex = 0;  // 选择第一个设备
+            }
+        }
+
+        /// <summary>
+        /// 拍照按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 拍摄当前视频帧并保存为图片：
+        /// 1. 获取当前视频帧
+        /// 2. 转换为BitmapSource
+        /// 3. 保存为PNG图片
+        /// 4. 关闭摄像头和窗体
+        /// </remarks>
+        private void button5_Click(object sender, EventArgs e)
+        {
+            // 检查是否有可用的视频设备
+            if (comboBox1.Items.Count <= 0)
+            {
+                MessageBox.Show("请插入视频设备");
+                return;
+            }
+            try
+            {
+                // 检查视频是否在运行
+                if (videoSourcePlayer1.IsRunning)
+                {
+                    // 将当前视频帧转换为BitmapSource对象
+                    BitmapSource bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                                    videoSourcePlayer1.GetCurrentVideoFrame().GetHbitmap(),
+                                    IntPtr.Zero,
+                                    Int32Rect.Empty,
+                                    BitmapSizeOptions.FromEmptyOptions());
+                    
+                    // 创建PNG编码器并添加图像帧
+                    PngBitmapEncoder pE = new PngBitmapEncoder();
+                    pE.Frames.Add(BitmapFrame.Create(bitmapSource));
+                    
+                    // 生成图片保存路径，使用时间戳确保文件名唯一
+                    string picName = GetImagePath() + "\\" + DateTime.Now.ToFileTime() + ".jpg";
+                    // 如果文件已存在，先删除
+                    if (File.Exists(picName))
+                    {
+                        File.Delete(picName);
+                    } 
+                    
+                    // 创建文件并保存图片
+                    using (Stream stream = File.Create(picName))
+                    {
+                        pE.Save(stream);
+                    }
+                    
+                    // 停止视频流
+                    if (videoSourcePlayer1 != null && videoSourcePlayer1.IsRunning)
+                    {
+                        videoSourcePlayer1.SignalToStop();
+                        videoSourcePlayer1.WaitForStop();
+                    }
+
+                    // 关闭窗体
+                    this.Close();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("摄像头异常：" + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 获取图片保存路径
+        /// </summary>
+        /// <returns>图片保存目录路径</returns>
+        /// <remarks>
+        /// 确保PersonImg目录存在，如不存在则创建
+        /// </remarks>
+        private string GetImagePath()
+        {
+            // 构建PersonImg目录路径
+            string personImgPath = Path.GetDirectoryName(AppDomain.CurrentDomain.BaseDirectory)
+                         + Path.DirectorySeparatorChar.ToString() + "PersonImg";
+            
+            // 如果目录不存在，创建它
+            if (!Directory.Exists(personImgPath))
+            {
+                Directory.CreateDirectory(personImgPath);
+            }
+
+            return personImgPath;
+        }
+
+        /// <summary>
+        /// 启动摄像头按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        private void button4_Click(object sender, EventArgs e)
+        {
+            CameraConn();  // 调用连接摄像头方法
+        }
+
+        /// <summary>
+        /// Bitmap转byte[]数组
+        /// </summary>
+        /// <param name="bitmap">位图对象</param>
+        /// <returns>字节数组</returns>
+        /// <remarks>
+        /// 将Bitmap图像转换为JPEG格式的字节数组
+        /// 用于后续的Base64编码和API调用
+        /// </remarks>
+        public byte[] Bitmap2Byte(Bitmap bitmap)
+        {
+            try
+            {
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    // 将位图保存为JPEG格式到内存流
+                    bitmap.Save(stream, ImageFormat.Jpeg);
+                    byte[] data = new byte[stream.Length];
+                    // 将流指针移到开始位置
+                    stream.Seek(0, SeekOrigin.Begin);
+                    // 读取全部字节到数组
+                    stream.Read(data, 0, Convert.ToInt32(stream.Length));
+                    return data;
+                }
+            } 
+            catch (Exception ex) { }
+            return null;
+        }
+
+        /// <summary>
+        /// BitmapSource转byte[]数组
+        /// </summary>
+        /// <param name="source">BitmapSource对象</param>
+        /// <returns>字节数组</returns>
+        /// <remarks>
+        /// 将WPF的BitmapSource转换为JPEG格式的字节数组
+        /// 主要用于处理摄像头捕获的图像
+        /// </remarks>
+        public byte[] BitmapSource2Byte(BitmapSource source)
+        {
+            try
+            {
+                // 创建JPEG编码器，设置最高质量
+                JpegBitmapEncoder encoder = new JpegBitmapEncoder();
+                encoder.QualityLevel = 100;
+                
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    // 添加图像帧并保存到内存流
+                    encoder.Frames.Add(BitmapFrame.Create(source));
+                    encoder.Save(stream);
+                    // 获取字节数组
+                    byte[] bit = stream.ToArray();
+                    stream.Close();
+                    return bit;
+                }
+            } 
+            catch (Exception ex)
+            {
+                ClassLoger.Error("BitmapSource2Byte", ex);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 人脸检测核心方法
+        /// </summary>
+        /// <param name="image">待检测的图像对象</param>
+        /// <remarks>
+        /// 实现人脸检测的完整流程：
+        /// 1. 图像预处理和转换
+        /// 2. 调用百度AI人脸检测API
+        /// 3. 解析检测结果
+        /// 4. 分析人脸质量并给出提示
+        /// </remarks>
+        public void Detect(object image)
+        {
+            // 检查图像对象有效性
+            if (image != null && image is Bitmap)
+            {
+                try
+                {
+                    // 图像预处理：转换为Bitmap并获取字节数据
+                    Bitmap img = (Bitmap)image;
+                    var imgByte = Bitmap2Byte(img);
+                    Image im = img;
+                    // 转换为Base64格式
+                    string image1 = ConvertImageToBase64(im);
+                    string imageType = "BASE64";
+
+                    if (imgByte != null)
+                    {
+                        /* 
+                         * 人脸检测API参数配置
+                         * max_face_num: 最多检测的人脸数量，设为2
+                         * face_fields: 需要返回的人脸属性，包括年龄、质量和颜值
+                         */
+                        var options = new Dictionary<string, object>{
+                            {"max_face_num", 2},  // 检测最多2个人脸
+                            {"face_fields", "age,qualities,beauty"}  // 返回年龄、质量和颜值信息
+                        };
+                        
+                        // 调用百度AI人脸检测API
+                        var result = client.Detect(image1, imageType, options);
+                        
+                        // 将JSON结果反序列化为FaceDetectInfo对象
+                        FaceDetectInfo detect = JsonHelper.DeserializeObject<FaceDetectInfo>(result.ToString());
+                        
+                        // 处理检测结果
+                        if (detect != null && detect.result_num > 0)
+                        {
+                            // 显示检测到的人脸年龄
+                            ageText.Text = detect.result[0].age.TryToString();
+                            // 保存人脸位置信息，用于绘制人脸框
+                            this.location = detect.result[0].location;
+                            
+                            // 构建人脸质量提示信息
+                            StringBuilder sb = new StringBuilder();
+                            
+                            /* 
+                             * 人脸质量分析
+                             * 基于百度AI返回的人脸质量参数进行分析
+                             * 针对不同质量问题给出具体提示
+                             */
+                            if (detect.result[0].qualities != null)
+                            {
+                                // 检查人脸模糊度
+                                if (detect.result[0].qualities.blur >= 0.7)
+                                {
+                                    sb.AppendLine("人脸过于模糊");
+                                }
+                                // 检查人脸完整度
+                                if (detect.result[0].qualities.completeness >= 0.4)
+                                {
+                                    sb.AppendLine("人脸不完整");
+                                }
+                                // 检查光照条件
+                                if (detect.result[0].qualities.illumination <= 40)
+                                {
+                                    sb.AppendLine("灯光光线质量不好");
+                                }
+                                
+                                // 检查面部遮挡情况
+                                if (detect.result[0].qualities.occlusion != null)
+                                {
+                                    // 左脸颊遮挡检测
+                                    if (detect.result[0].qualities.occlusion.left_cheek >= 0.8)
+                                    {
+                                        sb.AppendLine("左脸颊不清晰");
+                                    }
+                                    // 左眼遮挡检测
+                                    if (detect.result[0].qualities.occlusion.left_eye >= 0.6)
+                                    {
+                                        sb.AppendLine("左眼不清晰");
+                                    }
+                                    // 嘴巴遮挡检测
+                                    if (detect.result[0].qualities.occlusion.mouth >= 0.7)
+                                    {
+                                        sb.AppendLine("嘴巴不清晰");
+                                    }
+                                    // 鼻子遮挡检测
+                                    if (detect.result[0].qualities.occlusion.nose >= 0.7)
+                                    {
+                                        sb.AppendLine("鼻子不清晰");
+                                    }
+                                    // 右脸颊遮挡检测
+                                    if (detect.result[0].qualities.occlusion.right_cheek >= 0.8)
+                                    {
+                                        sb.AppendLine("右脸颊不清晰");
+                                    }
+                                    // 右眼遮挡检测
+                                    if (detect.result[0].qualities.occlusion.right_eye >= 0.6)
+                                    {
+                                        sb.AppendLine("右眼不清晰");
+                                    }
+                                    // 下巴遮挡检测
+                                    if (detect.result[0].qualities.occlusion.chin >= 0.6)
+                                    {
+                                        sb.AppendLine("下巴不清晰");
+                                    }
+                                    
+                                    /* 
+                                     * 人脸姿态分析
+                                     * 分析人脸的俯仰角(pitch)、横滚角(roll)和偏航角(yaw)
+                                     * 给出调整建议
+                                     */
+                                    if (detect.result[0].pitch >= 20)
+                                    {
+                                        sb.AppendLine("俯视角度太大");
+                                    }
+                                    if (detect.result[0].roll >= 20)
+                                    {
+                                        sb.AppendLine("脸部应该放正");
+                                    }
+                                    if (detect.result[0].yaw >= 20)
+                                    {
+                                        sb.AppendLine("脸部应该放正点");
+                                    }
+                                }
+                            }
+                            
+                            // 检查人脸尺寸是否过小
+                            if (detect.result[0].location.height <= 100 || detect.result[0].location.height <= 100)
+                            {
+                                sb.AppendLine("人脸部分过小");
+                            }
+                            
+                            // 显示质量分析结果
+                            textBox4.Text = sb.ToString();
+                            // 如果没有质量问题，显示"OK"
+                            if (textBox4.Text.IsNull())
+                            {
+                                textBox4.Text = "OK";
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ClassLoger.Error("Form1.image", ex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 窗体关闭事件处理
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 窗体关闭时退出应用程序
+        /// </remarks>
+        private void Form1_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            System.Environment.Exit(0);  // 退出应用程序
+        }
+
+        /// <summary>
+        /// 人脸注册按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 实现人脸注册流程：
+        /// 1. 获取用户信息和分组ID
+        /// 2. 捕获当前视频帧
+        /// 3. 调用百度AI人脸注册API
+        /// 4. 处理注册结果
+        /// </remarks>
+        private void button7_Click(object sender, EventArgs e)
+        {
+            /* 
+             * 人脸注册参数设置
+             * uid: 用户ID，用于唯一标识用户
+             * userInfo: 用户附加信息，长度限制256B
+             * groupId: 用户组ID，用于分类管理用户
+             */
+            string uid = "1";  // 用户ID
+            string userInfo = textBox6.Text.Trim();  // 用户资料
+            string groupId = textBox5.Text.Trim();  // 用户组ID
+
+            // 检查是否有可用的视频设备
+            if (comboBox1.Items.Count <= 0)
+            {
+                MessageBox.Show("请插入视频设备");
+                return;
+            }
+            try
+            {
+                // 检查视频是否在运行
+                if (videoSourcePlayer1.IsRunning)
+                {
+                    // 获取当前视频帧并转换为BitmapSource
+                    BitmapSource bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                                    videoSourcePlayer1.GetCurrentVideoFrame().GetHbitmap(),
+                                    IntPtr.Zero,
+                                    Int32Rect.Empty,
+                                    BitmapSizeOptions.FromEmptyOptions());
+                    
+                    // 转换为字节数组
+                    var img = BitmapSource2Byte(bitmapSource);
+                    
+                    /* 
+                     * 人脸注册API参数配置
+                     * action_type: 指定操作类型为替换(replace)
+                     * 替换模式下，如果用户已存在，则覆盖原有的人脸信息
+                     */
+                    var options = new Dictionary<string, object>{
+                        {"action_type", "replace"}  // 替换模式
+                    };
+                    
+                    // 调用百度AI人脸注册API
+                    var result = client.UserAdd(Convert.ToBase64String(img), "BASE64", groupId, uid, options);
+                    
+                    // 处理注册结果
+                    if (result.ToString().Contains("error_code"))
+                    {
+                        MessageBox.Show("注册失败:" + result.ToString());
+                    }
+                    else
+                    {
+                        MessageBox.Show("注册成功");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("摄像头异常：" + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 人脸登录按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 实现人脸登录流程：
+        /// 1. 捕获当前视频帧
+        /// 2. 构建API所需的请求参数
+        /// 3. 调用百度AI人脸搜索API
+        /// 4. 处理搜索结果，识别用户身份
+        /// </remarks>
+        private void button8_Click(object sender, EventArgs e)
+        {
+            /* 
+             * 人脸登录参数设置
+             * 这些参数在此方法中未使用，是从上一个方法中保留的
+             */
+            string uid = "1";  // 用户ID
+            string userInfo = textBox6.Text.Trim();  // 用户资料
+            string groupId = textBox5.Text.Trim();  // 用户组ID
+
+            // 检查是否有可用的视频设备
+            if (comboBox1.Items.Count <= 0)
+            {
+                MessageBox.Show("请插入视频设备");
+                return;
+            }
+            try
+            {
+                // 检查视频是否在运行
+                if (videoSourcePlayer1.IsRunning)
+                {
+                    // 获取当前视频帧并转换为BitmapSource
+                    BitmapSource bitmapSource = Imaging.CreateBitmapSourceFromHBitmap(
+                                    videoSourcePlayer1.GetCurrentVideoFrame().GetHbitmap(),
+                                    IntPtr.Zero,
+                                    Int32Rect.Empty,
+                                    BitmapSizeOptions.FromEmptyOptions());
+
+                    // 转换为字节数组
+                    var img = BitmapSource2Byte(bitmapSource);
+
+                    /* 
+                     * 人脸搜索API参数配置
+                     * match_threshold: 匹配阈值，超过该值才认为匹配成功，范围0-100
+                     * quality_control: 图片质量控制，NORMAL表示中等质量要求
+                     * liveness_control: 活体检测控制，LOW表示低级别活体检测
+                     * max_user_num: 最多返回的用户数量
+                     */
+                    var options = new Dictionary<string, object>{
+                        {"match_threshold", 70},  // 匹配阈值为70
+                        {"quality_control", "NORMAL"},  // 中等质量控制
+                        {"liveness_control", "LOW"},  // 低级别活体检测
+                        {"max_user_num", 3}  // 最多返回3个匹配用户
+                    };
+
+                    // 注意：下面的人脸识别API调用已被注释
+                    //var result = client.Identify(groupId, img);
+                    //JArray faces=null;
+                    //var result = client.Faceverify(faces);
+                    
+                    // 将图像转换为Base64编码
+                    var image = Convert.ToBase64String(img);
+                    var imageType = "BASE64";
+                    
+                    // 指定用户组ID
+                    var groupIdList = "hubu_609";
+
+                    /* 
+                     * 调用百度AI人脸搜索API
+                     * 在指定的用户组中搜索最相似的人脸
+                     * 返回匹配的用户列表及相似度分数
+                     */
+                    var result = client.Search(image, imageType, groupIdList, options);
+
+                    // 注释掉的类型声明
+                    //FaceDetectInfo;
+                    //FaceshapeInfo;
+                    //FaceIdentifyInfo info = JsonHelper.DeserializeObject<FaceIdentifyInfo>(result.ToString());
+
+                    // 处理搜索结果
+                    if (result.Value<int>("error_code") == 0) {
+                        // 获取匹配的用户列表
+                        JArray array = result["result"].Value<JArray>("user_list");
+                        // 显示匹配到的第一个用户ID
+                        textBox7.Text = array[0].Value<string>("user_id");
+
+                        // 播放登录成功提示音
+                        //System.Media.SystemSounds.Exclamation.Play();  // 使用系统声音（已注释）
+                        axWindowsMediaPlayer1.URL = "20230522_160638_1.mp3";  // 设置音频文件
+                        axWindowsMediaPlayer1.Ctlcontrols.play();  // 播放音频
+                    }
+                   
+                    // 注释掉的旧代码
+                    //FaceIdentifyInfo info = JsonHelper.DeserializeObject<FaceIdentifyInfo>(result.ToString());
+                    // /  if (info!=null && info.result!=null && info.result.Length>0)
+                    //   {
+                    //      textBox7.Text = info.;
+                    // }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("摄像头异常：" + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 停止按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件源</param>
+        /// <param name="e">事件参数</param>
+        /// <remarks>
+        /// 停止音频播放和视频采集
+        /// </remarks>
+        private void button9_Click(object sender, EventArgs e)
+        {
+            // 停止音频播放
+            axWindowsMediaPlayer1.Ctlcontrols.stop();
+            
+            // 检查视频设备是否可用
+            if (videoDevices == null || videoDevices.Count == 0)
+            {
+                return;
+            }
+            
+            // 停止视频采集
+            videoSource.Stop();
+            videoSourcePlayer1.Stop();
+            
+            // 注释掉的资源释放代码
+            //videoSourcePlayer1.Dispose();
+            
+            // 注释掉的排序算法提示
+            //排序算法
+        }
+    }
+}
