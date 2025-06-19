@@ -258,6 +258,7 @@
             this.textBox4.Name = "textBox4";
             this.textBox4.Size = new System.Drawing.Size(340, 106);
             this.textBox4.TabIndex = 9;
+            this.textBox4.TextChanged += new System.EventHandler(this.textBox4_TextChanged);
             // 
             // label3
             // 
@@ -276,6 +277,7 @@
             this.ageText.Name = "ageText";
             this.ageText.Size = new System.Drawing.Size(88, 28);
             this.ageText.TabIndex = 7;
+            this.ageText.TextChanged += new System.EventHandler(this.ageText_TextChanged);
             // 
             // label1
             // 

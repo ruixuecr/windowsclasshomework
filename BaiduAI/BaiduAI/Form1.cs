@@ -15,11 +15,12 @@ using System.Linq;
 using System.Security.Policy;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
-
+using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
 namespace BaiduAI
 {
@@ -61,6 +62,8 @@ namespace BaiduAI
         private FilterInfoCollection videoDevices = null;  // 存储系统可用的所有视频输入设备
         private VideoCaptureDevice videoSource;  // 当前使用的视频捕获设备
 
+        private CancellationTokenSource _cancellationTokenSource;
+
         /*
          * 窗体初始化方法
          * 完成UI界面、百度AI SDK客户端初始化等工作 
@@ -85,11 +88,26 @@ namespace BaiduAI
         /// </remarks>
         public string ConvertImageToBase64(Image file)
         {
-            using (MemoryStream memoryStream = new MemoryStream())
+            if (file == null)
             {
-                file.Save(memoryStream, file.RawFormat);  // 保持原始图像格式写入内存流
-                byte[] imageBytes = memoryStream.ToArray();  // 获取图像字节数组
-                return Convert.ToBase64String(imageBytes);  // 转换为Base64字符串
+                return null;
+            }
+            
+            try
+            {
+                using (MemoryStream memoryStream = new MemoryStream())
+                {
+                    // 明确指定使用JPEG格式保存，而不是使用RawFormat
+                    // RawFormat可能会引发encoder为null的错误
+                    file.Save(memoryStream, ImageFormat.Jpeg);
+                    byte[] imageBytes = memoryStream.ToArray();  // 获取图像字节数组
+                    return Convert.ToBase64String(imageBytes);  // 转换为Base64字符串
+                }
+            }
+            catch (Exception ex)
+            {
+                ClassLoger.Error("ConvertImageToBase64", ex);
+                return null;
             }
         }
 
@@ -154,6 +172,7 @@ namespace BaiduAI
                     // 调用百度AI人脸检测API
                     var result = client.Detect(image, imageType, options);
 
+                    
                     // 将检测结果显示在文本框中
                     textBox1.Text = result.ToString();
 
@@ -286,6 +305,9 @@ namespace BaiduAI
         /// </remarks>
         private void Form1_Load(object sender, EventArgs e)
         {
+            // 初始化取消令牌源
+            _cancellationTokenSource = new CancellationTokenSource();
+
             /* 
              * 视频设备初始化
              * 枚举系统中的所有视频输入设备并加载到下拉列表中
@@ -308,13 +330,19 @@ namespace BaiduAI
              * 由于百度AI平台人脸识别接口限制每秒最多调用2次
              * 使用线程池实现定时启动人脸检测
              */
-            ThreadPool.QueueUserWorkItem(new WaitCallback(p => {
-                while (true)
+            ThreadPool.QueueUserWorkItem(state => {
+                while (!_cancellationTokenSource.Token.IsCancellationRequested)
                 {
-                    IsStart = true;  // 设置检测标志为true
-                    Thread.Sleep(500);  // 等待500毫秒，实现每秒检测2次
+                    IsStart = true;
+                    try {
+                        // 使用可取消的等待
+                        Task.Delay(500, _cancellationTokenSource.Token).Wait();
+                    }
+                    catch (OperationCanceledException) {
+                        break; // 优雅退出
+                    }
                 }
-            }));
+            });
         }
 
         /// <summary>
@@ -339,7 +367,7 @@ namespace BaiduAI
                      * 使用线程池避免UI阻塞，确保视频流畅
                      * 传入当前帧的克隆进行处理
                      */
-                    ThreadPool.QueueUserWorkItem(new WaitCallback(this.Detect), image.Clone());
+                    //ThreadPool.QueueUserWorkItem(new WaitCallback(this.Detect), image.Clone());
                 }
                 
                 // 如果检测到人脸位置信息，在视频帧上绘制人脸框
@@ -434,7 +462,7 @@ namespace BaiduAI
         /// 1. 获取当前视频帧
         /// 2. 转换为BitmapSource
         /// 3. 保存为PNG图片
-        /// 4. 显示保存成功消息
+        /// 4. 使用百度AI进行人脸识别
         /// </remarks>
         private void button5_Click(object sender, EventArgs e)
         {
@@ -451,87 +479,98 @@ namespace BaiduAI
                 {
                     // 获取当前视频帧
                     Bitmap currentFrame = videoSourcePlayer1.GetCurrentVideoFrame();
-                    
-                    // 将当前视频帧转换为BitmapSource对象
-                    BitmapSource bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
-                                currentFrame.GetHbitmap(),
-                                IntPtr.Zero,
-                                Int32Rect.Empty,
-                                BitmapSizeOptions.FromEmptyOptions());
-                    
-                    // 创建PNG编码器并添加图像帧
-                    PngBitmapEncoder pE = new PngBitmapEncoder();
-                    pE.Frames.Add(BitmapFrame.Create(bitmapSource));
-                    
-                    // 生成图片保存路径，使用时间戳确保文件名唯一
-                    string picName = GetImagePath() + "\\" + DateTime.Now.ToFileTime() + ".jpg";
-                    // 如果文件已存在，先删除
-                    if (File.Exists(picName))
+                    if (currentFrame == null)
                     {
-                        File.Delete(picName);
-                    } 
-                    
-                    // 创建文件并保存图片
-                    using (Stream stream = File.Create(picName))
-                    {
-                        pE.Save(stream);
+                        MessageBox.Show("无法获取视频帧", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
                     }
+
+                    // 创建一个较小尺寸的Bitmap来减少内存消耗
+                    Bitmap resizedFrame = null;
+                    string picName = GetImagePath() + "\\" + DateTime.Now.ToFileTime() + ".jpg";
                     
-                    // 对捕获的图像进行人脸检测和分析
-                    // 将代码与Detect方法中的类似
                     try
                     {
-                        // 图像预处理
-                        var imgByte = Bitmap2Byte(currentFrame);
-                        string image1 = ConvertImageToBase64(currentFrame);
-                        string imageType = "BASE64";
-
-                        if (imgByte != null)
+                        // 将大图像缩小到更合理的尺寸以减少内存消耗
+                        int maxWidth = 800;
+                        int maxHeight = 600;
+                        
+                        // 计算新尺寸，保持宽高比
+                        double ratioX = (double)maxWidth / currentFrame.Width;
+                        double ratioY = (double)maxHeight / currentFrame.Height;
+                        double ratio = Math.Min(ratioX, ratioY);
+                        
+                        int newWidth = (int)(currentFrame.Width * ratio);
+                        int newHeight = (int)(currentFrame.Height * ratio);
+                        
+                        // 创建缩小的图像
+                        resizedFrame = new Bitmap(newWidth, newHeight);
+                        using (Graphics g = Graphics.FromImage(resizedFrame))
                         {
-                            // 人脸检测API参数配置
+                            g.DrawImage(currentFrame, 0, 0, newWidth, newHeight);
+                        }
+                        
+                        // 直接保存JPEG图像到文件系统
+                        if (File.Exists(picName))
+                        {
+                            File.Delete(picName);
+                        }
+                        
+                        // 保存为JPEG格式
+                        resizedFrame.Save(picName, ImageFormat.Jpeg);
+                        
+                        try
+                        {
+                            // 获取当前视频帧作为图片对象
+                            Image imageForDetect = resizedFrame;
+                            // 添加调试信息，验证图像是否有效
+                            Console.WriteLine($"图像格式: {imageForDetect.RawFormat}, 尺寸: {imageForDetect.Width}x{imageForDetect.Height}");
+                            
+                            // 转换为Base64格式
+                            var imageBase64 = ConvertImageToBase64(imageForDetect);
+                            // 添加调试信息，验证Base64编码结果
+                            Console.WriteLine($"Base64编码长度: {imageBase64?.Length ?? 0}");
+                            
+                            string imageType = "BASE64";
+                            
+                            // 记录所有API参数
                             var options = new Dictionary<string, object>{
-                                {"max_face_num", 2},
-                                {"face_fields", "age,qualities,beauty"}
+                                {"face_field", "age,beauty"}
                             };
+                            Console.WriteLine($"API参数: {string.Join(", ", options.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
                             
                             // 调用百度AI人脸检测API
-                            var result = client.Detect(image1, imageType, options);
+                            var result = client.Detect(imageBase64, imageType, options);
                             
-                            // 反序列化结果
-                            FaceDetectInfo detect = JsonHelper.DeserializeObject<FaceDetectInfo>(result.ToString());
-                            
-                            // 获取检测结果并构建信息提示
-                            string faceInfo = "";
-                            if (detect != null && detect.result_num > 0)
+                            // 在调用API后，直接解析结果显示
+                            Console.WriteLine("API返回结果: " + result.ToString());
+
+                            // 检查是否成功检测到人脸
+                            if (result["error_code"].Value<int>() == 0 && 
+                                result["result"] != null && 
+                                result["result"]["face_list"] != null && 
+                                result["result"]["face_list"].Count() > 0)
                             {
-                                // 构建信息字符串，包含年龄
-                                faceInfo += $"年龄：{detect.result[0].age}\n";
+                                // 获取人脸信息
+                                JToken faceInfo = result["result"]["face_list"][0];
+                                string age = faceInfo["age"].ToString();
+                                string beauty = faceInfo["beauty"].ToString();
                                 
-                                // 构建人脸质量提示信息
-                                StringBuilder sb = new StringBuilder();
-                                
-                                if (detect.result[0].qualities != null)
+                                // 保存人脸位置信息用于显示
+                                this.location = new FaceLocation
                                 {
-                                    // 添加各种质量检测结果到信息中
-                                    // 检查人脸模糊度
-                                    if (detect.result[0].qualities.blur >= 0.7)
-                                    {
-                                        sb.AppendLine("人脸过于模糊");
-                                    }
-                                    // 其他质量检查保持不变...
-                                    
-                                    // 添加质量信息到结果
-                                    faceInfo += "质量分析：\n" + sb.ToString();
-                                    
-                                    // 如果没有质量问题
-                                    if (sb.Length == 0)
-                                    {
-                                        faceInfo += "质量分析：良好\n";
-                                    }
-                                }
+                                    left = (int)faceInfo["location"]["left"],
+                                    top = (int)faceInfo["location"]["top"],
+                                    width = (int)faceInfo["location"]["width"],
+                                    height = (int)faceInfo["location"]["height"]
+                                };
+
+                                // 在检测到人脸后
                                 
+                                    ageText.Text = age;
+                                    textBox4.Text = beauty;
                                 // 显示合并的保存和人脸信息消息
-                                MessageBox.Show($"图片已成功保存至：\n{picName}\n\n人脸信息：\n{faceInfo}", 
+                                MessageBox.Show($"图片已成功保存至：\n{picName}\n\n人脸信息：\n年龄：{age}\n美颜度：{beauty}", 
                                     "拍照成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
                             }
                             else
@@ -541,12 +580,32 @@ namespace BaiduAI
                                     "拍照成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
                             }
                         }
+                        catch (Exception ex)
+                        {
+                            // 记录详细异常信息
+                            Console.WriteLine($"异常类型: {ex.GetType().FullName}");
+                            Console.WriteLine($"异常消息: {ex.Message}");
+                            Console.WriteLine($"堆栈跟踪: {ex.StackTrace}");
+                            
+                            // 人脸分析发生错误但图片已保存
+                            MessageBox.Show($"图片已成功保存至：\n{picName}\n\n人脸分析异常：{ex.Message}", 
+                                "拍照成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            
+                            // 记录错误到日志
+                            ClassLoger.Error("button5_Click", ex);
+                        }
                     }
-                    catch (Exception ex)
+                    finally
                     {
-                        // 人脸分析发生错误但图片已保存
-                        MessageBox.Show($"图片已成功保存至：\n{picName}\n\n人脸分析异常：{ex.Message}", 
-                            "拍照成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        // 确保释放非托管资源
+                        if (resizedFrame != null)
+                        {
+                            resizedFrame.Dispose();
+                        }
+                        if (currentFrame != null)
+                        {
+                            currentFrame.Dispose();
+                        }
                     }
                 }
             }
@@ -669,146 +728,199 @@ namespace BaiduAI
             // 检查图像对象有效性
             if (image != null && image is Bitmap)
             {
+                Bitmap img = null;
                 try
                 {
                     // 图像预处理：转换为Bitmap并获取字节数据
-                    Bitmap img = (Bitmap)image;
-                    var imgByte = Bitmap2Byte(img);
-                    Image im = img;
-                    // 转换为Base64格式
-                    string image1 = ConvertImageToBase64(im);
-                    string imageType = "BASE64";
-
-                    if (imgByte != null)
+                    img = (Bitmap)image;
+                    
+                    // 创建较小的副本以减少内存占用
+                    Bitmap smallerImg = null;
+                    try
                     {
-                        /* 
-                         * 人脸检测API参数配置
-                         * max_face_num: 最多检测的人脸数量，设为2
-                         * face_fields: 需要返回的人脸属性，包括年龄、质量和颜值
-                         */
-                        var options = new Dictionary<string, object>{
-                            {"max_face_num", 2},  // 检测最多2个人脸
-                            {"face_fields", "age,qualities,beauty"}  // 返回年龄、质量和颜值信息
-                        };
+                        // 将大图像缩小到更合理的尺寸以减少内存消耗
+                        int maxWidth = 400; // 用于实时检测的更小尺寸
+                        int maxHeight = 300;
                         
-                        // 调用百度AI人脸检测API
-                        var result = client.Detect(image1, imageType, options);
+                        // 计算新尺寸，保持宽高比
+                        double ratioX = (double)maxWidth / img.Width;
+                        double ratioY = (double)maxHeight / img.Height;
+                        double ratio = Math.Min(ratioX, ratioY);
                         
-                        // 将JSON结果反序列化为FaceDetectInfo对象
-                        FaceDetectInfo detect = JsonHelper.DeserializeObject<FaceDetectInfo>(result.ToString());
-                        
-                        // 处理检测结果
-                        if (detect != null && detect.result_num > 0)
+                        if (ratio < 1.0) // 只有在图像大于目标尺寸时才调整大小
                         {
-                            // 显示检测到的人脸年龄
-                            ageText.Text = detect.result[0].age.TryToString();
-                            // 保存人脸位置信息，用于绘制人脸框
-                            this.location = detect.result[0].location;
+                            int newWidth = (int)(img.Width * ratio);
+                            int newHeight = (int)(img.Height * ratio);
                             
-                            // 构建人脸质量提示信息
-                            StringBuilder sb = new StringBuilder();
-                            
-                            /* 
-                             * 人脸质量分析
-                             * 基于百度AI返回的人脸质量参数进行分析
-                             * 针对不同质量问题给出具体提示
-                             */
-                            if (detect.result[0].qualities != null)
+                            // 创建缩小的图像
+                            smallerImg = new Bitmap(newWidth, newHeight);
+                            using (Graphics g = Graphics.FromImage(smallerImg))
                             {
-                                // 检查人脸模糊度
-                                if (detect.result[0].qualities.blur >= 0.7)
-                                {
-                                    sb.AppendLine("人脸过于模糊");
-                                }
-                                // 检查人脸完整度
-                                if (detect.result[0].qualities.completeness >= 0.4)
-                                {
-                                    sb.AppendLine("人脸不完整");
-                                }
-                                // 检查光照条件
-                                if (detect.result[0].qualities.illumination <= 40)
-                                {
-                                    sb.AppendLine("灯光光线质量不好");
-                                }
-                                
-                                // 检查面部遮挡情况
-                                if (detect.result[0].qualities.occlusion != null)
-                                {
-                                    // 左脸颊遮挡检测
-                                    if (detect.result[0].qualities.occlusion.left_cheek >= 0.8)
-                                    {
-                                        sb.AppendLine("左脸颊不清晰");
-                                    }
-                                    // 左眼遮挡检测
-                                    if (detect.result[0].qualities.occlusion.left_eye >= 0.6)
-                                    {
-                                        sb.AppendLine("左眼不清晰");
-                                    }
-                                    // 嘴巴遮挡检测
-                                    if (detect.result[0].qualities.occlusion.mouth >= 0.7)
-                                    {
-                                        sb.AppendLine("嘴巴不清晰");
-                                    }
-                                    // 鼻子遮挡检测
-                                    if (detect.result[0].qualities.occlusion.nose >= 0.7)
-                                    {
-                                        sb.AppendLine("鼻子不清晰");
-                                    }
-                                    // 右脸颊遮挡检测
-                                    if (detect.result[0].qualities.occlusion.right_cheek >= 0.8)
-                                    {
-                                        sb.AppendLine("右脸颊不清晰");
-                                    }
-                                    // 右眼遮挡检测
-                                    if (detect.result[0].qualities.occlusion.right_eye >= 0.6)
-                                    {
-                                        sb.AppendLine("右眼不清晰");
-                                    }
-                                    // 下巴遮挡检测
-                                    if (detect.result[0].qualities.occlusion.chin >= 0.6)
-                                    {
-                                        sb.AppendLine("下巴不清晰");
-                                    }
+                                g.DrawImage(img, 0, 0, newWidth, newHeight);
+                            }
+                        }
+                        else
+                        {
+                            // 如果图像已经足够小，直接克隆
+                            smallerImg = new Bitmap(img);
+                        }
+                    
+                        var imgByte = Bitmap2Byte(smallerImg);
+                        
+                        // 转换为Base64格式
+                        string image1 = ConvertImageToBase64(smallerImg);
+                        string imageType = "BASE64";
+
+                        if (imgByte != null)
+                        {
+                            /* 
+                             * 人脸检测API参数配置
+                             * max_face_num: 最多检测的人脸数量，设为2
+                             * face_field: 需要返回的人脸属性，包括年龄、质量和颜值
+                             */
+                            var options = new Dictionary<string, object>{
+                                {"max_face_num", 2},  // 检测最多2个人脸
+                                {"face_field", "age,qualities,beauty"}  // 返回年龄、质量和颜值信息
+                            };
+                            
+                            // 调用百度AI人脸检测API
+                            var result = client.Detect(image1, imageType, options);
+                            
+                            // 将JSON结果反序列化为FaceDetectInfo对象
+                            FaceDetectInfo detect = JsonHelper.DeserializeObject<FaceDetectInfo>(result.ToString());
+                            
+                            // 处理检测结果
+                            if (detect != null && detect.result_num > 0)
+                            {
+                                // 需要使用Invoke在UI线程上更新UI控件
+                                this.Invoke((MethodInvoker)delegate {
+                                    // 显示检测到的人脸年龄
+                                    ageText.Text = detect.result[0].age.TryToString();
+                                    // 保存人脸位置信息，用于绘制人脸框
+                                    this.location = detect.result[0].location;
+                                    
+                                    // 构建人脸质量提示信息
+                                    StringBuilder sb = new StringBuilder();
                                     
                                     /* 
-                                     * 人脸姿态分析
-                                     * 分析人脸的俯仰角(pitch)、横滚角(roll)和偏航角(yaw)
-                                     * 给出调整建议
+                                     * 人脸质量分析
+                                     * 基于百度AI返回的人脸质量参数进行分析
+                                     * 针对不同质量问题给出具体提示
                                      */
-                                    if (detect.result[0].pitch >= 20)
+                                    if (detect.result[0].qualities != null)
                                     {
-                                        sb.AppendLine("俯视角度太大");
+                                        // 检查人脸模糊度
+                                        if (detect.result[0].qualities.blur >= 0.7)
+                                        {
+                                            sb.AppendLine("人脸过于模糊");
+                                        }
+                                        // 检查人脸完整度
+                                        if (detect.result[0].qualities.completeness >= 0.4)
+                                        {
+                                            sb.AppendLine("人脸不完整");
+                                        }
+                                        // 检查光照条件
+                                        if (detect.result[0].qualities.illumination <= 40)
+                                        {
+                                            sb.AppendLine("灯光光线质量不好");
+                                        }
+                                        
+                                        // 检查面部遮挡情况
+                                        if (detect.result[0].qualities.occlusion != null)
+                                        {
+                                            // 左脸颊遮挡检测
+                                            if (detect.result[0].qualities.occlusion.left_cheek >= 0.8)
+                                            {
+                                                sb.AppendLine("左脸颊不清晰");
+                                            }
+                                            // 左眼遮挡检测
+                                            if (detect.result[0].qualities.occlusion.left_eye >= 0.6)
+                                            {
+                                                sb.AppendLine("左眼不清晰");
+                                            }
+                                            // 嘴巴遮挡检测
+                                            if (detect.result[0].qualities.occlusion.mouth >= 0.7)
+                                            {
+                                                sb.AppendLine("嘴巴不清晰");
+                                            }
+                                            // 鼻子遮挡检测
+                                            if (detect.result[0].qualities.occlusion.nose >= 0.7)
+                                            {
+                                                sb.AppendLine("鼻子不清晰");
+                                            }
+                                            // 右脸颊遮挡检测
+                                            if (detect.result[0].qualities.occlusion.right_cheek >= 0.8)
+                                            {
+                                                sb.AppendLine("右脸颊不清晰");
+                                            }
+                                            // 右眼遮挡检测
+                                            if (detect.result[0].qualities.occlusion.right_eye >= 0.6)
+                                            {
+                                                sb.AppendLine("右眼不清晰");
+                                            }
+                                            // 下巴遮挡检测
+                                            if (detect.result[0].qualities.occlusion.chin >= 0.6)
+                                            {
+                                                sb.AppendLine("下巴不清晰");
+                                            }
+                                            
+                                            /* 
+                                             * 人脸姿态分析
+                                             * 分析人脸的俯仰角(pitch)、横滚角(roll)和偏航角(yaw)
+                                             * 给出调整建议
+                                             */
+                                            if (detect.result[0].pitch >= 20)
+                                            {
+                                                sb.AppendLine("俯视角度太大");
+                                            }
+                                            if (detect.result[0].roll >= 20)
+                                            {
+                                                sb.AppendLine("脸部应该放正");
+                                            }
+                                            if (detect.result[0].yaw >= 20)
+                                            {
+                                                sb.AppendLine("脸部应该放正点");
+                                            }
+                                        }
                                     }
-                                    if (detect.result[0].roll >= 20)
+                                    
+                                    // 检查人脸尺寸是否过小
+                                    if (detect.result[0].location.height <= 100 || detect.result[0].location.width <= 100)
                                     {
-                                        sb.AppendLine("脸部应该放正");
+                                        sb.AppendLine("人脸部分过小");
                                     }
-                                    if (detect.result[0].yaw >= 20)
+                                    
+                                    // 显示质量分析结果
+                                    textBox4.Text = sb.ToString();
+                                    // 如果没有质量问题，显示"OK"
+                                    if (textBox4.Text.IsNull())
                                     {
-                                        sb.AppendLine("脸部应该放正点");
+                                        textBox4.Text = "OK";
                                     }
-                                }
+                                });
                             }
-                            
-                            // 检查人脸尺寸是否过小
-                            if (detect.result[0].location.height <= 100 || detect.result[0].location.height <= 100)
-                            {
-                                sb.AppendLine("人脸部分过小");
-                            }
-                            
-                            // 显示质量分析结果
-                            textBox4.Text = sb.ToString();
-                            // 如果没有质量问题，显示"OK"
-                            if (textBox4.Text.IsNull())
-                            {
-                                textBox4.Text = "OK";
-                            }
+                        }
+                    }
+                    finally
+                    {
+                        // 释放资源
+                        if (smallerImg != null)
+                        {
+                            smallerImg.Dispose();
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    ClassLoger.Error("Form1.image", ex);
+                    ClassLoger.Error("Form1.Detect", ex);
+                }
+                finally
+                {
+                    // 释放原始图像资源
+                    if (img != null && img != image) // 只有在我们创建了新的Bitmap时才释放
+                    {
+                        img.Dispose();
+                    }
                 }
             }
         }
@@ -823,7 +935,20 @@ namespace BaiduAI
         /// </remarks>
         private void Form1_FormClosed(object sender, FormClosedEventArgs e)
         {
-            System.Environment.Exit(0);  // 退出应用程序
+            // 请求取消所有后台操作
+            _cancellationTokenSource?.Cancel();
+            
+            // 停止所有线程、释放资源
+            if (videoSource != null && videoSource.IsRunning)
+            {
+                videoSource.Stop();
+            }
+            
+            // 等待一段时间确保线程有机会清理
+            Thread.Sleep(100);
+            
+            // 退出应用程序
+            System.Environment.Exit(0);
         }
 
         /// <summary>
@@ -1029,6 +1154,16 @@ namespace BaiduAI
             
             // 注释掉的排序算法提示
             //排序算法
+        }
+
+        private void ageText_TextChanged(object sender, EventArgs e)
+        {
+
+        }
+
+        private void textBox4_TextChanged(object sender, EventArgs e)
+        {
+
         }
     }
 }
